@@ -1,0 +1,424 @@
+//@version=6
+// NeuraLib AI Trend Detector
+//
+// This work is licensed under a Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0) https://creativecommons.org/licenses/by-nc-sa/4.0/
+// For commercial use licensing, contact https://www.tradingview.com/u/Alien_Algorithms/
+// © Alien_Algorithms
+//
+indicator("AI Trend Detector | Adaptive Signals [NeuraLib Machine Learning]", "AI Trend Detector [Alien_Algorithms]", overlay = false, calc_bars_count = 2500, max_bars_back = 2500, max_labels_count = 500)
+
+import Alien_Algorithms/NeuraLib/1 as nl
+// NeuraLib_Models is an extension library. Importing it adds methods such as
+// temporalConvStack() and globalAvgPool1d() to nl.Sequential.
+import Alien_Algorithms/NeuraLib_Models/1 as models
+
+// This script trains a small supervised model on confirmed historical bars, then uses the
+// current feature window to estimate Bear, Neutral, and Bull pressure.
+//
+// The model is not trained on trades, exits, or PnL. It learns a simple label:
+// where price moved after a fixed horizon, measured against local volatility.
+
+
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+const int FEATURE_COUNT = 3
+const int CLASS_COUNT = 3
+const int CLASS_BEAR = 0
+const int CLASS_NEUTRAL = 1
+const int CLASS_BULL = 2
+const float EPS = 1e-9
+const int ARRAY_SAFE_LIMIT = 90000
+
+const string GROUP_DATA = "1. Data & Features"
+const string GROUP_LABEL = "2. Trend Label"
+const string GROUP_NET = "3. Neural Network"
+const string GROUP_TRAIN = "4. Training"
+const string GROUP_VIS = "5. Visuals"
+const string MARKER_MODE_INTO = "Crossing into"
+const string MARKER_MODE_OUT = "Going out of"
+const string MARKER_MODE_ROTATION = "Rotation inside zone"
+
+// -----------------------------------------------------------------------------
+// Inputs
+// -----------------------------------------------------------------------------
+
+float srcInput = input.source(close, "Price source", group = GROUP_DATA, tooltip = "Series used for feature returns, MA distance, and trend labels.")
+int maLenInput = input.int(34, "Adaptive MA length", minval = 5, maxval = 200, group = GROUP_DATA, tooltip = "Length used for the adaptive moving average efficiency calculation. Higher values make the baseline slower and smoother.")
+int maFastInput = input.int(4, "Fast response", minval = 2, maxval = 30, group = GROUP_DATA, tooltip = "Fastest adaptive response speed for the moving average. Lower values allow quicker reaction when price movement is efficient.")
+int maSlowInput = input.int(60, "Slow response", minval = 10, maxval = 300, group = GROUP_DATA, tooltip = "Slowest adaptive response speed for the moving average. Higher values make the baseline more stable during noisy movement.")
+int volLenInput = input.int(30, "Decision volatility", minval = 2, maxval = 200, group = GROUP_DATA, tooltip = "Volatility used to normalize future movement when creating trend labels.")
+
+int horizonInput = input.int(8, "Trend horizon", minval = 1, maxval = 180, group = GROUP_LABEL, tooltip = "Bars ahead used to label a past state after the future has resolved.")
+float neutralThresholdInput = input.float(0.6, "Neutral threshold", minval = 0.0, maxval = 5.0, step = 0.05, group = GROUP_LABEL, tooltip = "Future move must exceed this volatility-normalized threshold to be Bull/Bear. Lower means fewer Neutral labels.")
+float temperatureInput = input.float(1.0, "Probability temperature", minval = 0.1, maxval = 5.0, step = 0.1, group = GROUP_LABEL, tooltip = "Softmax temperature for display probabilities. Lower is sharper.")
+
+int sequenceLenInput = input.int(30, "Temporal state window", minval = 20, maxval = 60, group = GROUP_NET, tooltip = "Number of recent bars used as one live model state. Higher values give the model more temporal context, but increase the input size.")
+int temporalFiltersInput = input.int(6, "Temporal filters", minval = 2, maxval = 12, group = GROUP_NET, tooltip = "Number of Conv1D-style filters used to extract temporal patterns from the state window. Higher values increase model capacity.")
+int temporalKernelInput = input.int(3, "Temporal kernel", minval = 1, maxval = 5, group = GROUP_NET, tooltip = "Number of neighboring time steps each temporal filter reads at once. Higher values look for broader short-term patterns.")
+int temporalLayersInput = input.int(1, "Temporal conv layers", minval = 1, maxval = 2, group = GROUP_NET, tooltip = "Number of temporal convolution layers. More layers can learn deeper sequence structure, but increase computation.")
+int hiddenUnitsInput = input.int(12, "Classifier neurons", minval = 4, maxval = 32, group = GROUP_NET, tooltip = "Number of neurons in each dense classifier layer after temporal pooling. Higher values increase model capacity.")
+int hiddenLayersInput = input.int(1, "Classifier layers", minval = 0, maxval = 2, group = GROUP_NET, tooltip = "Number of dense hidden layers before the final Bear, Neutral, and Bull outputs.")
+float dropoutInput = input.float(0.0, "Dropout", minval = 0.0, maxval = 0.4, step = 0.05, group = GROUP_NET, tooltip = "Randomly drops part of the hidden representation during training. Can reduce overfitting, but high values may weaken learning in small Pine models.")
+float learningRateInput = input.float(0.003, "Learning rate", minval = 0.0001, maxval = 0.05, step = 0.0001, group = GROUP_NET, tooltip = "Optimizer step size used during training. Higher values adapt faster but may become unstable. Lower values train more slowly.")
+int seedInput = input.int(13, "Random seed", minval = 1, maxval = 100000, group = GROUP_NET, tooltip = "Controls initial model weights. Changing it rebuilds the model with a different starting state.")
+
+int trainingWindowsInput = input.int(60, "Training windows", minval = 20, maxval = 400, group = GROUP_TRAIN, tooltip = "Rolling sequence examples retained and trained as one full NeuraLib trainBatch. Effective value is capped by Pine matrix limits.")
+int trainPassesInput = input.int(1, "Training passes", minval = 1, maxval = 10, group = GROUP_TRAIN, tooltip = "Number of times each training batch is replayed when training occurs. Higher values learn more per update, but may overfit faster.")
+int trainStrideInput = input.int(4, "Train every N bars", minval = 1, maxval = 20, group = GROUP_TRAIN, tooltip = "Controls how often the model trains. 1 trains every confirmed bar. Higher values reduce computation and update less frequently.")
+int trainWindowInput = input.int(1000, "Historical train window", minval = 50, maxval = 2000, group = GROUP_TRAIN, tooltip = "Only run training inside the most recent N historical bars, while still collecting rows.")
+
+bool showMaInput = input.bool(true, "Adaptive MA", group = GROUP_VIS, tooltip = "Shows the adaptive MA baseline and AI-biased cloud on the main chart.")
+bool showDashInput = input.bool(true, "Dashboard", group = GROUP_VIS, tooltip = "Shows the compact state dashboard on the main chart.")
+bool showGradientInput = input.bool(true, "Cyan-purple oscillator", group = GROUP_VIS, tooltip = "Shows the layered cyan-purple oscillator cloud around the trend signal.")
+bool showConfidenceInput = input.bool(true, "Directional confidence", group = GROUP_VIS, tooltip = "Shows the stronger directional model probability, calculated as max(Bull, Bear). Neutral is not included, so this reflects directional conviction rather than overall model certainty.")
+int signalSmoothInput = input.int(6, "Zero-lag smoothing", minval = 0, maxval = 50, group = GROUP_VIS, tooltip = "Applies DEMA-style zero-lag smoothing to the oscillator signal. 0 leaves the signal raw; higher values visibly smooth the line and marker logic.")
+float maCloudStrengthInput = input.float(1.6, "AI MA cloud strength", minval = 0.1, maxval = 4.0, step = 0.1, group = GROUP_VIS, tooltip = "Visual-only strength of the oscillator-biased MA cloud on the main chart.")
+bool showChartTrianglesInput = input.bool(true, "Chart triangles", group = GROUP_VIS, tooltip = "Shows confirmed overbought and oversold triangle markers on the main chart.")
+string triangleModeInput = input.string(MARKER_MODE_ROTATION, "Triangle trigger", options = [MARKER_MODE_INTO, MARKER_MODE_OUT, MARKER_MODE_ROTATION], group = GROUP_VIS, tooltip = "Controls how the oscillator must interact with overbought/oversold levels before drawing triangles on the main chart.")
+int rotationConfirmBarsInput = input.int(1, "Rotation confirmation", minval = 1, maxval = 20, group = GROUP_VIS, active = triangleModeInput == MARKER_MODE_ROTATION, tooltip = "Bars after a candidate overbought/oversold rotation that must not break the peak/trough before a triangle is drawn.")
+float overboughtLevelInput = input.float(65.0, "Overbought level", minval = 50.0, maxval = 100.0, step = 1.0, group = GROUP_VIS, tooltip = "Oscillator level used as the overbought zone threshold for visual reads and triangle logic.")
+float oversoldLevelInput = input.float(18.2, "Oversold level", minval = 0.0, maxval = 50.0, step = 1.0, group = GROUP_VIS, tooltip = "Oscillator level used as the oversold zone threshold for visual reads and triangle logic.")
+color bullColorInput = input.color(#00e5ff, "Bull", inline = "col", group = GROUP_VIS, tooltip = "Color used for bullish pressure, oversold visuals, and bullish triangle markers.")
+color neutralColorInput = input.color(#8f9bff, "Neutral", inline = "col", group = GROUP_VIS, tooltip = "Color used for neutral or balanced model pressure.")
+color bearColorInput = input.color(#a855f7, "Bear", inline = "col", group = GROUP_VIS, tooltip = "Color used for bearish pressure, overbought visuals, and bearish triangle markers.")
+
+// -----------------------------------------------------------------------------
+// Derived settings
+// -----------------------------------------------------------------------------
+
+// NeuraLib sequence blocks require fixed simple sizes. The inputs above are
+// converted once into simple values, then reused by the dataset and model.
+simple int sequenceLength = sequenceLenInput
+simple int featureCount = FEATURE_COUNT
+simple int modelInputCount = sequenceLength * featureCount
+simple int temporalFilters = temporalFiltersInput
+simple int temporalKernel = math.min(temporalKernelInput, sequenceLength)
+simple int temporalLayerCapacity = temporalKernel <= 1 ? temporalLayersInput : int(math.floor((sequenceLength - 1) / (temporalKernel - 1)))
+simple int temporalLayers = math.max(math.min(temporalLayersInput, math.max(temporalLayerCapacity, 1)), 1)
+simple int temporalStepsOut = math.max(sequenceLength - temporalLayers * (temporalKernel - 1), 1)
+simple int firstTemporalSteps = math.max(sequenceLength - (temporalKernel - 1), 1)
+simple int convStep2 = math.max(firstTemporalSteps - (temporalKernel - 1), 1)
+simple int convIm2col1 = firstTemporalSteps * temporalKernel * featureCount
+simple int convIm2col2 = temporalLayers >= 2 ? convStep2 * temporalKernel * temporalFilters : 0
+simple int maxConvIm2colWidth = math.max(convIm2col1, convIm2col2)
+// trainBatch() unrolls every retained RollingDataset window. This cap keeps
+// the generated matrices inside Pine's practical array and matrix limits.
+simple int maxTrainingMatrixWidth = math.max(modelInputCount, math.max(maxConvIm2colWidth, math.max(firstTemporalSteps * temporalFilters, math.max(hiddenUnitsInput, CLASS_COUNT))))
+simple int maxTrainingWindows = math.max(int(math.floor(ARRAY_SAFE_LIMIT / math.max(maxTrainingMatrixWidth, 1))), 1)
+simple int trainingWindows = math.min(trainingWindowsInput, maxTrainingWindows)
+simple int datasetRows = sequenceLength + trainingWindows - 1
+simple float dropoutRate = dropoutInput
+simple int signalSmoothLength = signalSmoothInput <= 0 ? 1 : signalSmoothInput * 2
+simple int maFast = math.min(maFastInput, math.max(maSlowInput - 1, 2))
+simple int maSlow = math.max(maSlowInput, maFast + 1)
+
+max_bars_back(srcInput, 2500)
+
+// -----------------------------------------------------------------------------
+// Small helpers
+// -----------------------------------------------------------------------------
+
+percentSpan(float fromValue, float toValue) =>
+    math.abs(fromValue) <= EPS ? na : 100.0 * (toValue - fromValue) / math.abs(fromValue)
+
+allFinite(array<float> values) =>
+    bool ok = true
+    for value in values
+        ok := ok and not na(value) and not na(value - value)
+    ok
+
+safeSoftmaxComponent(float value, float maxValue, float temperature) =>
+    math.exp((value - maxValue) / math.max(temperature, EPS))
+
+fmt(float value, int digits) =>
+    na(value) ? "-" : str.tostring(value, "0." + str.repeat("#", digits))
+
+signalGradient(float value) =>
+    float v = math.max(math.min(value, 100.0), 0.0)
+    color result = na
+    if not na(value)
+        if v <= 25.0
+            result := color.from_gradient(v, 0.0, 25.0, #00e5ff, #36f5ff)
+        else if v <= 50.0
+            result := color.from_gradient(v, 25.0, 50.0, #36f5ff, #7aa7ff)
+        else if v <= 75.0
+            result := color.from_gradient(v, 50.0, 75.0, #7aa7ff, #b56cff)
+        else
+            result := color.from_gradient(v, 75.0, 100.0, #b56cff, #d946ef)
+    result
+
+// -----------------------------------------------------------------------------
+// Feature engineering
+// -----------------------------------------------------------------------------
+
+// This is a Kaufman-style adaptive moving average. It serves two roles:
+// 1. A visible baseline on the chart.
+// 2. A model feature through its value and the price distance from it.
+float stepVol = ta.stdev(srcInput - srcInput[1], volLenInput)
+float maPath = math.sum(math.abs(srcInput - srcInput[1]), maLenInput)
+float maMove = math.abs(srcInput - srcInput[maLenInput])
+float maEfficiency = maMove / (maPath + EPS)
+float fastAlpha = 2.0 / (maFast + 1.0)
+float slowAlpha = 2.0 / (maSlow + 1.0)
+float maAlpha = math.pow(maEfficiency * (fastAlpha - slowAlpha) + slowAlpha, 2.0)
+float maAlphaSafe = na(maAlpha) ? slowAlpha * slowAlpha : maAlpha
+var float adaptiveMa = na
+adaptiveMa := na(adaptiveMa[1]) ? srcInput : adaptiveMa[1] + maAlphaSafe * (srcInput - adaptiveMa[1])
+
+// Raw feature row, one bar at a time.
+// RollingDataset later applies z-score normalization column by column, so the
+// model sees stable inputs even when chart price scales vary.
+float closeReturnPct = percentSpan(srcInput[1], srcInput)
+float maValue = adaptiveMa
+float maDistancePct = percentSpan(adaptiveMa, srcInput)
+
+max_bars_back(adaptiveMa, 2500)
+max_bars_back(closeReturnPct, 2500)
+max_bars_back(maValue, 2500)
+max_bars_back(maDistancePct, 2500)
+max_bars_back(stepVol, 2500)
+
+// The feature order matters. Every row pushed into the dataset, and every live
+// prediction row, must use the same order.
+pushFeaturesAt(array<float> row, int offset) =>
+    row.push(closeReturnPct[offset])
+    row.push(maValue[offset])
+    row.push(maDistancePct[offset])
+    row
+
+featureRowAt(int offset) =>
+    array<float> row = array.new<float>()
+    pushFeaturesAt(row, offset)
+
+singleFeatureReadyAt(int offset) =>
+    not na(closeReturnPct[offset]) and not na(maValue[offset]) and not na(maDistancePct[offset])
+
+stateReadyAt(int offset) =>
+    bool ready = true
+    for step = 0 to sequenceLength - 1
+        if not singleFeatureReadyAt(offset + sequenceLength - 1 - step)
+            ready := false
+    ready
+
+stateRowAt(int offset) =>
+    array<float> row = array.new<float>()
+    for step = 0 to sequenceLength - 1
+        pushFeaturesAt(row, offset + sequenceLength - 1 - step)
+    row
+
+// A label is only created after the future has already happened. On a confirmed
+// bar, srcInput[h] is the older anchor and srcInput is the resolved value.
+trendScoreAt(int h) =>
+    float futureReturn = percentSpan(srcInput[h], srcInput)
+    float basis = math.abs(srcInput[h]) <= EPS ? na : 100.0 * stepVol[h] * math.sqrt(h) / math.abs(srcInput[h])
+    na(futureReturn) or na(basis) or basis <= EPS ? na : futureReturn / basis
+
+// NeuraLib trains this as a three-class softmax problem:
+// Bear = [1, 0, 0], Neutral = [0, 1, 0], Bull = [0, 0, 1].
+targetRowFromScore(float score) =>
+    array<float> result = array.new<float>()
+    if score > neutralThresholdInput
+        result := array.from(0.0, 0.0, 1.0)
+    else if score < -neutralThresholdInput
+        result := array.from(1.0, 0.0, 0.0)
+    else
+        result := array.from(0.0, 1.0, 0.0)
+    result
+
+// -----------------------------------------------------------------------------
+// NeuraLib model and dataset
+// -----------------------------------------------------------------------------
+
+var nl.Sequential model = nl.sequential("trend_detector")
+var nl.RollingDataset dataset = nl.rollingDataset(sequenceLength, featureCount, CLASS_COUNT, datasetRows, "trend_detector_rows")
+var bool modelReady = false
+var float pBear = na
+var float pNeutral = na
+var float pBull = na
+var float trendGaugeRaw = na
+var float trendGauge = na
+var float confidence = na
+
+if barstate.isfirst
+    nl.CompileConfig cfg = nl.compileConfig()
+    cfg := cfg.loss(nl.LossKind.softmaxCrossEntropyFromLogits).metric(nl.MetricKind.categoricalAccuracy).optimizer(nl.adamW(learningRateInput)).trainEveryCall().historyLength(100).clipNorm(1.0)
+
+    // Model shape:
+    // flattened sequence input -> temporal convolution -> average pool -> dense head -> 3 logits.
+    //
+    // The Conv1D and pooling calls come from NeuraLib_Models. The rest is core NeuraLib.
+    model := nl.sequential("trend_detector_nn").input(array.from(modelInputCount), "state_window")
+    model := model.temporalConvStack(sequenceLength, featureCount, temporalFilters, temporalKernel, temporalLayers, 1, nl.ActivationKind.relu, dropoutRate, "temporal")
+    model := model.globalAvgPool1d(temporalStepsOut, temporalFilters, "temporal_avg")
+    if hiddenLayersInput >= 1
+        model := model.dense(hiddenUnitsInput, nl.ActivationKind.relu, "detector_1")
+    if hiddenLayersInput >= 2
+        model := model.dense(hiddenUnitsInput, nl.ActivationKind.relu, "detector_2")
+    model := model.dense(CLASS_COUNT, nl.ActivationKind.linear, "trend_logits").build(nl.rng(seedInput)).compile(cfg)
+    dataset := dataset.setInputScaler(nl.ScalerKind.zScore).setTargetScaler(nl.ScalerKind.none)
+
+// -----------------------------------------------------------------------------
+// Dataset update and training
+// -----------------------------------------------------------------------------
+
+int warmupBars = math.max(maLenInput, volLenInput)
+bool histReady = bar_index > warmupBars + horizonInput + sequenceLength + 2
+float resolvedScore = trendScoreAt(horizonInput)
+
+// Push one resolved training example per confirmed bar. The row belongs to the
+// anchor bar h bars ago, while the target comes from the move that has now resolved.
+if barstate.isconfirmed and histReady and singleFeatureReadyAt(horizonInput) and not na(resolvedScore)
+    array<float> featureRow = featureRowAt(horizonInput)
+    array<float> targetRow = targetRowFromScore(resolvedScore)
+    if allFinite(featureRow) and allFinite(targetRow)
+        dataset := dataset.pushRow(featureRow, targetRow)
+
+// During the historical pass, last_bar_index is the final loaded bar on the chart.
+// This keeps expensive training inside the most recent N historical bars, while
+// barstate.isrealtime allows the model to keep updating after the script is loaded.
+bool inTrainingZone = barstate.isrealtime or bar_index >= last_bar_index - trainWindowInput
+bool trainDue = inTrainingZone and bar_index % trainStrideInput == 0
+bool enoughWindows = dataset.ready(trainingWindows, 0)
+if barstate.isconfirmed and enoughWindows and trainDue
+    // trainBatch() turns the rolling rows into sequence windows. This is the
+    // main convenience of RollingDataset for time-series examples.
+    nl.Batch trainBatch = dataset.trainBatch(0, 0)
+    for passIndex = 0 to trainPassesInput - 1
+        model := model.trainOnBatch(trainBatch.inputTensor, trainBatch.targetTensor)
+    modelReady := true
+
+// -----------------------------------------------------------------------------
+// Live inference
+// -----------------------------------------------------------------------------
+
+if modelReady and stateReadyAt(0)
+    // Build a live state row with the same layout as the training windows, then
+    // use the dataset scaler so inference is normalized exactly like training.
+    nl.Tensor liveInput = nl.vector(stateRowAt(0), "live_state")
+    nl.Tensor scaledInput = dataset.scaleInput(liveInput)
+    nl.Tensor logits = model.predict(scaledInput)
+    float bearLogit = logits.get1d(CLASS_BEAR)
+    float neutralLogit = logits.get1d(CLASS_NEUTRAL)
+    float bullLogit = logits.get1d(CLASS_BULL)
+    float maxLogit = math.max(bearLogit, math.max(neutralLogit, bullLogit))
+    float eBear = safeSoftmaxComponent(bearLogit, maxLogit, temperatureInput)
+    float eNeutral = safeSoftmaxComponent(neutralLogit, maxLogit, temperatureInput)
+    float eBull = safeSoftmaxComponent(bullLogit, maxLogit, temperatureInput)
+    float den = eBear + eNeutral + eBull
+    pBear := 100.0 * eBear / den
+    pNeutral := 100.0 * eNeutral / den
+    pBull := 100.0 * eBull / den
+
+    // Display scale:
+    // lower values show oversold or bullish pressure.
+    // higher values show overbought or bearish pressure.
+    trendGaugeRaw := 50.0 + 0.5 * (pBear - pBull)
+    confidence := math.max(pBull, pBear)
+
+// -----------------------------------------------------------------------------
+// Signal processing and marker rules
+// -----------------------------------------------------------------------------
+
+float signalEma1 = ta.ema(trendGaugeRaw, signalSmoothLength)
+float signalEma2 = ta.ema(signalEma1, signalSmoothLength)
+float zeroLagSignal = 2.0 * signalEma1 - signalEma2
+trendGauge := signalSmoothInput <= 0 ? trendGaugeRaw : math.max(math.min(zeroLagSignal, 100.0), 0.0)
+
+bool crossIntoOversold = ta.crossunder(trendGauge, oversoldLevelInput)
+bool crossIntoOverbought = ta.crossover(trendGauge, overboughtLevelInput)
+bool crossOutOversold = ta.crossover(trendGauge, oversoldLevelInput)
+bool crossOutOverbought = ta.crossunder(trendGauge, overboughtLevelInput)
+float confirmedOversoldPivot = ta.pivotlow(trendGauge, 1, rotationConfirmBarsInput)
+float confirmedOverboughtPivot = ta.pivothigh(trendGauge, 1, rotationConfirmBarsInput)
+bool turnUpInsideOversold = not na(confirmedOversoldPivot) and confirmedOversoldPivot <= oversoldLevelInput
+bool turnDownInsideOverbought = not na(confirmedOverboughtPivot) and confirmedOverboughtPivot >= overboughtLevelInput
+bool triangleModeRotation = triangleModeInput == MARKER_MODE_ROTATION
+bool oversoldTriangleNow = showChartTrianglesInput and barstate.isconfirmed and not triangleModeRotation and (triangleModeInput == MARKER_MODE_INTO ? crossIntoOversold : crossOutOversold)
+bool overboughtTriangleNow = showChartTrianglesInput and barstate.isconfirmed and not triangleModeRotation and (triangleModeInput == MARKER_MODE_INTO ? crossIntoOverbought : crossOutOverbought)
+bool oversoldTriangleRotation = showChartTrianglesInput and barstate.isconfirmed and triangleModeRotation and turnUpInsideOversold
+bool overboughtTriangleRotation = showChartTrianglesInput and barstate.isconfirmed and triangleModeRotation and turnDownInsideOverbought
+
+// -----------------------------------------------------------------------------
+// Visual model outputs
+// -----------------------------------------------------------------------------
+
+color gaugeColor = na(trendGauge) ? na : trendGauge >= 50.0 ? color.from_gradient(trendGauge, 50.0, 100.0, neutralColorInput, bearColorInput) : color.from_gradient(trendGauge, 0.0, 50.0, bullColorInput, neutralColorInput)
+color oscillatorColor = showGradientInput ? signalGradient(trendGauge) : gaugeColor
+float chartAtr = ta.atr(14)
+float maVisualBias = na(trendGauge) ? 0.0 : (trendGauge - 50.0) / 50.0
+
+// The main-chart cloud is visual only. The model is not trained on visibleMa.
+// It shifts away from the adaptive MA as the oscillator moves away from neutral.
+float visibleMa = adaptiveMa + chartAtr * maCloudStrengthInput * maVisualBias
+float signalFlow = na(trendGauge) or na(trendGauge[1]) ? 0.0 : math.min(math.abs(trendGauge - trendGauge[1]) / 8.0, 1.0)
+int signalLineTransparency = int(math.round(42.0 - 34.0 * signalFlow))
+int signalGlowTransparency = int(math.round(88.0 - 18.0 * signalFlow))
+int oscillatorCloudInnerTransparency = int(math.round(68.0 - 20.0 * signalFlow))
+int oscillatorCloudMidTransparency = int(math.round(78.0 - 16.0 * signalFlow))
+int oscillatorCloudOuterTransparency = int(math.round(90.0 - 10.0 * signalFlow))
+int cloudTransparency = int(math.round(60.0 - 30.0 * math.min(math.abs(maVisualBias), 1.0)))
+color maVisualColor = na(trendGauge) ? color.new(neutralColorInput, 30) : oscillatorColor
+color signalLineColor = color.new(oscillatorColor, signalLineTransparency)
+color signalGlowColor = color.new(oscillatorColor, signalGlowTransparency)
+color oscillatorCloudColor = color.new(oscillatorColor, oscillatorCloudInnerTransparency)
+color oscillatorMidCloudColor = color.new(oscillatorColor, oscillatorCloudMidTransparency)
+color oscillatorOuterCloudColor = color.new(oscillatorColor, oscillatorCloudOuterTransparency)
+color maCloudColor = color.new(oscillatorColor, cloudTransparency)
+
+// Pine fills are flat between two plots. Layering several hidden follower lines
+// creates a smoother cloud without drawing extra visible moving averages.
+float oscillatorCloudFast = ta.ema(trendGauge, 14)
+float oscillatorCloudMid = ta.ema(trendGauge, 34)
+float oscillatorCloudSlow = ta.ema(trendGauge, 72)
+oscSlowPlot = plot(showGradientInput ? oscillatorCloudSlow : na, "Trend oscillator slow cloud", color = color.new(oscillatorColor, 100), linewidth = 1)
+oscMidPlot = plot(showGradientInput ? oscillatorCloudMid : na, "Trend oscillator mid cloud", color = color.new(oscillatorColor, 100), linewidth = 1)
+oscFastPlot = plot(showGradientInput ? oscillatorCloudFast : na, "Trend oscillator fast cloud", color = color.new(oscillatorColor, 100), linewidth = 1)
+oscSignalPlot = plot(trendGauge, "Trend oscillator", color = signalLineColor, linewidth = 2)
+plot(showGradientInput ? trendGauge : na, "Trend oscillator glow", color = signalGlowColor, linewidth = 5)
+fill(oscSignalPlot, oscFastPlot, color = showGradientInput ? oscillatorCloudColor : na, title = "Signal cloud fast")
+fill(oscFastPlot, oscMidPlot, color = showGradientInput ? oscillatorMidCloudColor : na, title = "Signal cloud mid")
+fill(oscMidPlot, oscSlowPlot, color = showGradientInput ? oscillatorOuterCloudColor : na, title = "Signal cloud slow")
+plot(showConfidenceInput ? confidence : na, "Directional confidence", color = color.new(neutralColorInput, 65), linewidth = 1)
+
+neutralLine = hline(50.0, "Neutral", color = color.new(color.gray, 55))
+overboughtLine = hline(overboughtLevelInput, "Overbought level", color = color.new(bearColorInput, 40))
+oversoldLine = hline(oversoldLevelInput, "Oversold level", color = color.new(bullColorInput, 40))
+
+maBasePlot = plot(showMaInput ? adaptiveMa : na, "Adaptive MA baseline", color = color.new(neutralColorInput, 62), linewidth = 1, force_overlay = true)
+maAiPlot = plot(showMaInput ? visibleMa : na, "AI MA cloud edge", color = maVisualColor, linewidth = 3, force_overlay = true)
+fill(maBasePlot, maAiPlot, color = showMaInput ? maCloudColor : na, title = "AI MA cloud")
+plotshape(oversoldTriangleNow, "Oversold triangle", style = shape.triangleup, location = location.belowbar, color = color.new(bullColorInput, 0), size = size.small, force_overlay = true)
+plotshape(overboughtTriangleNow, "Overbought triangle", style = shape.triangledown, location = location.abovebar, color = color.new(bearColorInput, 0), size = size.small, force_overlay = true)
+plotshape(oversoldTriangleRotation, "Oversold rotation triangle", style = shape.triangleup, location = location.belowbar, color = color.new(bullColorInput, 0), size = size.small, force_overlay = true)
+plotshape(overboughtTriangleRotation, "Overbought rotation triangle", style = shape.triangledown, location = location.abovebar, color = color.new(bearColorInput, 0), size = size.small, force_overlay = true)
+
+// -----------------------------------------------------------------------------
+// Dashboard and alerts
+// -----------------------------------------------------------------------------
+
+var table dash = na
+if showDashInput and barstate.islast
+    if na(dash)
+        dash := table.new(position.bottom_right, 2, 4, bgcolor = color.new(#11071f, 6), frame_color = color.new(#7c3cff, 22), frame_width = 2, border_color = color.new(#00e5ff, 68), border_width = 1, force_overlay = true)
+    string stateText = trendGauge <= oversoldLevelInput ? "OVERSOLD" : trendGauge >= overboughtLevelInput ? "OVERBOUGHT" : "BALANCED"
+    string readText = trendGauge <= oversoldLevelInput ? "Potential bounce" : trendGauge >= overboughtLevelInput ? "Potential pullback" : trendGauge < 50.0 ? "Bullish side" : trendGauge > 50.0 ? "Bearish side" : "Neutral"
+    string momentumText = trendGauge > trendGauge[1] ? "Rising" : trendGauge < trendGauge[1] ? "Falling" : "Flat"
+    color stateColor = trendGauge <= oversoldLevelInput ? bullColorInput : trendGauge >= overboughtLevelInput ? bearColorInput : neutralColorInput
+    color headerBg = color.new(stateColor, 14)
+    color rowBg = color.new(#130d22, 0)
+    color altBg = color.new(#0c1326, 0)
+    color labelColor = color.new(#aab4ff, 0)
+    color valueColor = color.new(#f7f8ff, 4)
+    table.cell(dash, 0, 0, "NEURALIB", text_color = color.white, text_size = size.small, bgcolor = headerBg)
+    table.cell(dash, 1, 0, stateText, text_color = color.white, text_size = size.small, bgcolor = headerBg)
+    table.cell(dash, 0, 1, "Signal", text_color = labelColor, text_size = size.tiny, bgcolor = rowBg)
+    table.cell(dash, 1, 1, fmt(trendGauge, 1) + " / 100", text_color = oscillatorColor, text_size = size.small, bgcolor = rowBg)
+    table.cell(dash, 0, 2, "Read", text_color = labelColor, text_size = size.tiny, bgcolor = altBg)
+    table.cell(dash, 1, 2, readText, text_color = valueColor, text_size = size.small, bgcolor = altBg)
+    table.cell(dash, 0, 3, "Confidence", text_color = labelColor, text_size = size.tiny, bgcolor = rowBg)
+    table.cell(dash, 1, 3, momentumText + "  " + fmt(confidence, 1) + "%", text_color = valueColor, text_size = size.small, bgcolor = rowBg)
+
+alertcondition(oversoldTriangleNow or oversoldTriangleRotation, "Trend detector oversold triangle", "NeuraLib AI Trend Detector printed an oversold triangle.")
+alertcondition(overboughtTriangleNow or overboughtTriangleRotation, "Trend detector overbought triangle", "NeuraLib AI Trend Detector printed an overbought triangle.")

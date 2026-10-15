@@ -405,7 +405,7 @@ The result is still a normal NeuraLib model: `.compile()`, `.trainOnBatch()`, `.
 
 ## Worked example: the AI Trend Detector
 
-The published indicator "AI Trend Detector | Adaptive Signals [NeuraLib Machine Learning]" is a complete NeuraLib application and a good template for your own scripts. This is how it maps onto everything above.
+The published indicator "AI Trend Detector | Adaptive Signals [NeuraLib Machine Learning]" is a complete NeuraLib application and a good template for your own scripts. It is on TradingView at https://www.tradingview.com/script/dfkynAUp-AI-Trend-Detector-Adaptive-Signals-NeuraLib-Machine-Learning/, and its full source is on GitHub at https://github.com/AlienAlgorithms/NeuraLib-A-Native-AI-and-Deep-Learning-Runtime-for-TradingView/tree/main/demos/ai-trend-detector. This is how it maps onto everything above.
 
 The goal: classify current market pressure as Bear, Neutral or Bull with a small neural network trained live on the chart.
 

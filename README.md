@@ -33,6 +33,7 @@ Pine Script is rare in AI training data, so assistants tend to guess library cal
 | [NeuraLib.pine](NeuraLib.pine) | The NeuraLib runtime, version 1, as published on TradingView |
 | [NeuraLib_Models.pine](NeuraLib_Models.pine) | The NeuraLib_Models expansion, version 1, as published on TradingView |
 | [MODELS.md](MODELS.md) | The NeuraLib_Models guide: model families, examples and API |
+| [demos/ai-trend-detector/](demos/ai-trend-detector/) | The AI Trend Detector: a complete published indicator built on both libraries, with its guide |
 | [REFERENCE.md](REFERENCE.md) | Both libraries in one file, for people and AI assistants |
 | [CHANGELOG.md](CHANGELOG.md) | What each version changed |
 | [LICENSE](LICENSE) | CC BY-NC-SA 4.0 legal text |
@@ -484,6 +485,12 @@ if barstate.isfirst
 *All the diagrams in this publication are rendered natively on TradingView using [Pine3D](https://www.tradingview.com/script/I2K4hIdP-Pine3D-A-Native-3D-Graphical-Rendering-Engine/)*
 
 ---
+
+## Built with NeuraLib
+
+[![AI Trend Detector on TradingView](https://s3.tradingview.com/d/dfkynAUp.png?v=1780969232)](https://www.tradingview.com/script/dfkynAUp-AI-Trend-Detector-Adaptive-Signals-NeuraLib-Machine-Learning/)
+
+**[AI Trend Detector](https://www.tradingview.com/script/dfkynAUp-AI-Trend-Detector-Adaptive-Signals-NeuraLib-Machine-Learning/)** is a complete indicator built on NeuraLib and NeuraLib_Models. A temporal convolution model trains on the chart to rate Bear, Neutral and Bull pressure, and drives an oscillator, an adaptive moving average cloud and confirmed signal markers. Its full source is in this repository: [demos/ai-trend-detector](demos/ai-trend-detector/), a working template for your own NeuraLib scripts.
 
 ## Related libraries
 
