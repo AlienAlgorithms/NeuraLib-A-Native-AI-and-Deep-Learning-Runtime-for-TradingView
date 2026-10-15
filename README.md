@@ -485,6 +485,11 @@ if barstate.isfirst
 
 ---
 
+## Related libraries
+
+- [Pine3D](https://github.com/AlienAlgorithms/Pine3D-A-Native-3D-Graphical-Rendering-Engine): 3D rendering in Pine Script. It draws the diagrams in the NeuraLib publication.
+- [PineCanvas](https://github.com/AlienAlgorithms/PineCanvas-A-Native-High-Resolution-Graphics-Engine-for-TradingView): heatmaps, high-resolution images and filled shapes in Pine Script.
+
 ## Licence
 
 NeuraLib and NeuraLib_Models are licensed under [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)](https://creativecommons.org/licenses/by-nc-sa/4.0/). The full legal text is in [LICENSE](LICENSE).
@@ -495,4 +500,4 @@ NeuraLib and NeuraLib_Models are licensed under [Creative Commons Attribution-No
 
 ## Author
 
-Built by [Alien_Algorithms on TradingView](https://www.tradingview.com/u/Alien_Algorithms/?aff_id=169033#published-scripts). More indicators and libraries at [alienalgorithms.com](https://alienalgorithms.com).
+Built by [Alien_Algorithms on TradingView](https://www.tradingview.com/u/Alien_Algorithms/?aff_id=169033#published-scripts) and [AlienAlgorithms on GitHub](https://github.com/AlienAlgorithms). More indicators and libraries at [alienalgorithms.com](https://alienalgorithms.com).

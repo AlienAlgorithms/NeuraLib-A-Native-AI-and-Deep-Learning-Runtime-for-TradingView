@@ -5,6 +5,7 @@
 - Product page: https://alienalgorithms.com/neurallib
 - Documentation: https://docs.alienalgorithms.com/Neuralib-AI-Framework-Tradingview
 - Library and source code on TradingView: https://www.tradingview.com/script/GewgOj30-NeuraLib-A-Native-AI-and-Deep-Learning-Runtime/
+- Source code of NeuraLib and NeuraLib_Models, examples and this reference on GitHub: https://github.com/AlienAlgorithms/NeuraLib-A-Native-AI-and-Deep-Learning-Runtime-for-TradingView
 - Import: `import Alien_Algorithms/NeuraLib/1 as nl`, and optionally `import Alien_Algorithms/NeuraLib_Models/1 as models` (use the latest version numbers shown on the TradingView publications)
 - Language: Pine Script v6
 - Author: Alien_Algorithms, https://www.tradingview.com/u/Alien_Algorithms/?aff_id=169033#published-scripts
