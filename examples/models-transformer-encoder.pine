@@ -1,0 +1,56 @@
+// NeuraLib Models Transformer Encoder Example
+// An example from the NeuraLib_Models publication on TradingView.
+// (c) Alien_Algorithms. Licensed under CC BY-NC-SA 4.0, see LICENSE.
+//@version=6
+indicator("NeuraLib Models Transformer Encoder Example", overlay = false, calc_bars_count = 600)
+
+import Alien_Algorithms/NeuraLib/1 as nl
+import Alien_Algorithms/NeuraLib_Models/1 as models
+
+var nl.Sequential encoder = nl.sequential("encoder_model")
+var float tokenSignal = na
+var float tokenContext = na
+var float tokenVolatility = na
+
+if barstate.isfirst
+    encoder := encoder
+      .input(array.from(4), "tokens")
+      .multiHeadSelfAttention(4, 2, true, "mha")
+      .transformerEncoder(4, true, 2, nl.ActivationKind.geluApprox, "encoder", 0.05, 2)
+      .build(nl.rng(11))
+
+float emaValue = ta.ema(close, 21)
+float atrValue = ta.atr(14)
+
+float ret0 = na(close[1]) or close[1] == 0.0 ? 0.0 : close / close[1] - 1.0
+float ret1 = na(close[2]) or close[2] == 0.0 ? 0.0 : close[1] / close[2] - 1.0
+float ret2 = na(close[3]) or close[3] == 0.0 ? 0.0 : close[2] / close[3] - 1.0
+float ret3 = na(close[4]) or close[4] == 0.0 ? 0.0 : close[3] / close[4] - 1.0
+
+float emaGap0 = emaValue == 0.0 ? 0.0 : close / emaValue - 1.0
+float emaGap1 = emaValue[1] == 0.0 ? 0.0 : close[1] / emaValue[1] - 1.0
+float emaGap2 = emaValue[2] == 0.0 ? 0.0 : close[2] / emaValue[2] - 1.0
+float emaGap3 = emaValue[3] == 0.0 ? 0.0 : close[3] / emaValue[3] - 1.0
+
+float atr0 = close == 0.0 ? 0.0 : atrValue / close
+float atr1 = close[1] == 0.0 ? 0.0 : atrValue[1] / close[1]
+float atr2 = close[2] == 0.0 ? 0.0 : atrValue[2] / close[2]
+float atr3 = close[3] == 0.0 ? 0.0 : atrValue[3] / close[3]
+
+bool ready = not na(ret3) and not na(emaGap3) and not na(atr3)
+if ready
+    nl.Tensor tokens = nl.vector(array.from(
+      ret3, emaGap3, atr3, -1.0,
+      ret2, emaGap2, atr2, -0.33,
+      ret1, emaGap1, atr1, 0.33,
+      ret0, emaGap0, atr0, 1.0), "tokens").reshape(array.from(4, 4))
+
+    nl.Tensor encoded = encoder.predict(tokens)
+    tokenSignal := encoded.get1d(12)
+    tokenContext := encoded.get1d(13)
+    tokenVolatility := encoded.get1d(14)
+
+plot(tokenSignal, "Latest token signal", color = color.aqua, linewidth = 2)
+plot(tokenContext, "Latest token context", color = color.purple)
+plot(tokenVolatility, "Latest token volatility", color = color.orange)
+hline(0.0, "Zero", color = color.new(color.gray, 70))

@@ -1,0 +1,81 @@
+// NeuraLib Return Validation Example
+// An example from the NeuraLib publication on TradingView.
+// (c) Alien_Algorithms. Licensed under CC BY-NC-SA 4.0, see LICENSE.
+//@version=6
+indicator("NeuraLib Return Validation Example", overlay = false, calc_bars_count = 600)
+
+import Alien_Algorithms/NeuraLib/1 as nl
+
+var nl.Sequential model = nl.sequential("returns_model")
+var nl.WindowDataset dataset = nl.windowDataset(4, 1, 500, "returns_dataset")
+var float predictedReturn = na
+var float validationLossValue = na
+var float trainingLossValue = na
+
+if barstate.isfirst
+    nl.CompileConfig cfg = nl.compileConfig()
+    cfg := cfg
+      .optimizer(nl.adamW(0.003))
+      .loss(nl.LossKind.huber)
+      .metric(nl.MetricKind.mae)
+      .trainEveryCall()
+
+    model := model
+      .input(array.from(4), "features")
+      .dense(8, nl.ActivationKind.relu, "hidden")
+      .dropout(0.10, "dropout")
+      .dense(1, nl.ActivationKind.linear, "next_return")
+      .compile(cfg)
+
+    dataset := dataset
+      .setInputScaler(nl.ScalerKind.zScore)
+      .setTargetScaler(nl.ScalerKind.zScore)
+
+float rsiValue = ta.rsi(close, 14)
+float emaValue = ta.ema(close, 21)
+float atrValue = ta.atr(14)
+float atrPct = close == 0.0 ? 0.0 : atrValue / close
+float momentum = na(close[1]) or close[1] == 0.0 ? 0.0 : close / close[1] - 1.0
+float realizedReturn = na(close[1]) ? na : nl.nextReturnValue(close[1], close)
+
+bool rowReady = not na(rsiValue[1]) and not na(emaValue[1]) and not na(atrPct[1]) and not na(momentum[1]) and not na(close[1])
+
+if rowReady
+    float prevEma = emaValue[1]
+    float priceVsEma = prevEma == 0.0 ? 0.0 : close[1] / prevEma - 1.0
+
+    array<float> features = array.from(
+      rsiValue[1],
+      priceVsEma,
+      atrPct[1],
+      momentum[1])
+
+    array<float> target = array.from(nl.nextReturnValue(close[1], close))
+
+    dataset := dataset.pushRow(features, target)
+
+if dataset.ready(64)
+    nl.Batch train = dataset.trainBatch(16)
+    nl.Batch validation = dataset.validationBatch(16)
+
+    model := model.trainOnBatch(train.inputTensor, train.targetTensor)
+    trainingLossValue := model.trainStats.lastLoss
+
+    nl.LossResult validationLoss = model.evaluate(validation.inputTensor, validation.targetTensor)
+    validationLossValue := validationLoss.value
+
+    bool liveReady = not na(rsiValue) and not na(emaValue) and not na(atrPct) and not na(momentum)
+    if liveReady
+        float livePriceVsEma = emaValue == 0.0 ? 0.0 : close / emaValue - 1.0
+        array<float> liveFeatures = array.from(rsiValue, livePriceVsEma, atrPct, momentum)
+        nl.Tensor liveInput = nl.vector(liveFeatures, "live_features")
+        nl.Tensor scaledInput = dataset.scaleInput(liveInput)
+        nl.Tensor scaledPrediction = model.predict(scaledInput)
+        nl.Tensor rawPrediction = dataset.inverseScaleTarget(scaledPrediction)
+        predictedReturn := rawPrediction.get1d(0)
+
+plot(realizedReturn, "Last realized return", color = color.gray)
+plot(predictedReturn, "Predicted next return", color = color.aqua, linewidth = 2)
+plot(validationLossValue, "Validation loss", color = color.orange)
+plot(trainingLossValue, "Training loss", color = color.new(color.blue, 35))
+hline(0.0, "Zero", color = color.new(color.gray, 70))

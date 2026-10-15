@@ -1,0 +1,41 @@
+// NeuraLib Basic Model
+// An example from the NeuraLib publication on TradingView.
+// (c) Alien_Algorithms. Licensed under CC BY-NC-SA 4.0, see LICENSE.
+//@version=6
+indicator("NeuraLib Basic Model", overlay = false, calc_bars_count = 600)
+
+import Alien_Algorithms/NeuraLib/1 as nl
+
+var nl.Sequential model = nl.sequential("basic_model")
+var float modelOutput = na
+
+if barstate.isfirst
+    nl.CompileConfig cfg = nl.compileConfig()
+    cfg := cfg
+      .optimizer(nl.adamW(0.001))
+      .loss(nl.LossKind.huber)
+      .metric(nl.MetricKind.mae)
+      .withTrainingGate(true)
+
+    model := model
+      .input(array.from(4), "features")
+      .dropout(0.15)
+      .dense(8, nl.ActivationKind.relu, "hidden")
+      .dense(1, nl.ActivationKind.linear, "output")
+      .compile(cfg)
+
+float rsiValue = ta.rsi(close, 14)
+float emaValue = ta.ema(close, 21)
+float atrValue = ta.atr(14)
+float atrPct = close == 0.0 ? 0.0 : atrValue / close
+float momentum = na(close[1]) or close[1] == 0.0 ? 0.0 : close / close[1] - 1.0
+
+bool ready = not na(rsiValue) and not na(emaValue) and not na(atrPct) and not na(momentum)
+if ready
+    float priceVsEma = emaValue == 0.0 ? 0.0 : close / emaValue - 1.0
+    nl.Tensor inputTensor = nl.vector(array.from(rsiValue, priceVsEma, atrPct, momentum), "features")
+    nl.Tensor outputTensor = model.predict(inputTensor)
+    modelOutput := outputTensor.get1d(0)
+
+plot(modelOutput, "Untrained model output", color = color.aqua, linewidth = 2)
+hline(0.0, "Zero", color = color.new(color.gray, 70))

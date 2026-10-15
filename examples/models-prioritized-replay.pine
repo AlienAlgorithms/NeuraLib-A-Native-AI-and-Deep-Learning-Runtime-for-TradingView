@@ -1,0 +1,55 @@
+// NeuraLib Models PER Example
+// An example from the NeuraLib_Models publication on TradingView.
+// (c) Alien_Algorithms. Licensed under CC BY-NC-SA 4.0, see LICENSE.
+//@version=6
+indicator("NeuraLib Models PER Example", overlay = false, calc_bars_count = 1200)
+
+import Alien_Algorithms/NeuraLib/1 as nl
+import Alien_Algorithms/NeuraLib_Models/1 as models
+
+var models.PrioritizedReplayBuffer replay = models.prioritizedReplayBuffer(4, 2, 300, "replay")
+var nl.Sequential replayModel = nl.sequential("replay_q_model")
+var float replayLoss = na
+var float firstImportanceWeight = na
+var float replayRows = na
+
+if barstate.isfirst
+    nl.CompileConfig cfg = nl.compileConfig()
+    cfg := cfg
+      .presetQValues()
+      .optimizer(nl.adamW(0.001))
+      .trainEveryCall()
+
+    replayModel := replayModel
+      .input(array.from(4), "state")
+      .dense(8, nl.ActivationKind.relu, "hidden")
+      .qHead(2, nl.ActivationKind.linear, "q_values")
+      .compile(cfg)
+
+float rsiValue = ta.rsi(close, 14)
+float emaValue = ta.ema(close, 21)
+float atrValue = ta.atr(14)
+float atrPct = close == 0.0 ? 0.0 : atrValue / close
+float momentum = na(close[1]) or close[1] == 0.0 ? 0.0 : close / close[1] - 1.0
+float nextReturn = na(close[1]) ? 0.0 : nl.nextReturnValue(close[1], close)
+
+bool rowReady = not na(rsiValue[1]) and not na(emaValue[1]) and not na(atrPct[1]) and not na(momentum[1])
+if rowReady
+    float prevEma = emaValue[1]
+    float priceVsEma = prevEma == 0.0 ? 0.0 : close[1] / prevEma - 1.0
+    array<float> stateFeatures = array.from(rsiValue[1] / 100.0, priceVsEma, atrPct[1], momentum[1])
+    array<float> targetValues = array.from(math.max(-nextReturn, 0.0), math.max(nextReturn, 0.0))
+    float priority = math.abs(nextReturn) + 0.0001
+    replay := replay.pushExperience(stateFeatures, targetValues, priority)
+    replayRows := float(replay.size())
+
+if replay.ready(32)
+    models.PrioritizedReplaySample sample = replay.sampleBatch(32, 0.6, 0.4, 17)
+    replayModel := replayModel.trainOnBatch(sample.batch.inputTensor, sample.batch.targetTensor)
+    replayLoss := replayModel.trainStats.lastLoss
+    firstImportanceWeight := sample.weightArray.size() > 0 ? sample.weightArray.get(0) : na
+    if sample.indexArray.size() > 0
+        replay := replay.updatePriority(sample.indexArray.get(0), replayLoss + 0.0001)
+
+plot(replayLoss, "Replay training loss", color = color.orange, linewidth = 2)
+plot(firstImportanceWeight, "First sample weight", color = color.aqua)

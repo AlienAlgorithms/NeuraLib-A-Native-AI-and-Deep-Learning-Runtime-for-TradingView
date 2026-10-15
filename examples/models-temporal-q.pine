@@ -1,0 +1,73 @@
+// NeuraLib Models Temporal Q Example
+// An example from the NeuraLib_Models publication on TradingView.
+// (c) Alien_Algorithms. Licensed under CC BY-NC-SA 4.0, see LICENSE.
+//@version=6
+indicator("NeuraLib Models Temporal Q Example", overlay = false, calc_bars_count = 600)
+
+import Alien_Algorithms/NeuraLib/1 as nl
+import Alien_Algorithms/NeuraLib_Models/1 as models
+
+var nl.Sequential qModel = nl.sequential("temporal_q_model")
+var nl.WindowDataset qDataset = nl.windowDataset(8, 3, 400, "q_rows")
+var float qDown = na
+var float qNeutral = na
+var float qUp = na
+var float qLoss = na
+
+if barstate.isfirst
+    nl.CompileConfig cfg = nl.compileConfig()
+    cfg := cfg
+      .presetQValues()
+      .optimizer(nl.adamW(0.001))
+      .withTrainingGate(true)
+
+    qModel := qModel
+      .input(array.from(8), "state_window")
+      .temporalConvStack(4, 2, 2, 2, 1, 1, nl.ActivationKind.relu, 0.0, "temporal")
+      .globalAvgPool1d(3, 2, "pool")
+      .duelingQHead(4, 3, nl.ActivationKind.relu, "dueling_head")
+      .compile(cfg)
+
+    qDataset := qDataset
+      .setInputScaler(nl.ScalerKind.zScore)
+      .setTargetScaler(nl.ScalerKind.none)
+
+float ret0 = na(close[1]) or close[1] == 0.0 ? 0.0 : close / close[1] - 1.0
+float ret1 = na(close[2]) or close[2] == 0.0 ? 0.0 : close[1] / close[2] - 1.0
+float ret2 = na(close[3]) or close[3] == 0.0 ? 0.0 : close[2] / close[3] - 1.0
+float ret3 = na(close[4]) or close[4] == 0.0 ? 0.0 : close[3] / close[4] - 1.0
+float ret4 = na(close[5]) or close[5] == 0.0 ? 0.0 : close[4] / close[5] - 1.0
+
+float atrValue = ta.atr(14)
+float atr0 = close == 0.0 ? 0.0 : atrValue / close
+float atr1 = close[1] == 0.0 ? 0.0 : atrValue[1] / close[1]
+float atr2 = close[2] == 0.0 ? 0.0 : atrValue[2] / close[2]
+float atr3 = close[3] == 0.0 ? 0.0 : atrValue[3] / close[3]
+float atr4 = close[4] == 0.0 ? 0.0 : atrValue[4] / close[4]
+
+bool rowReady = not na(ret4) and not na(atr4)
+if rowReady
+    array<float> features = array.from(ret4, atr4, ret3, atr3, ret2, atr2, ret1, atr1)
+    float downTarget = math.max(-ret0, 0.0)
+    float neutralTarget = math.max(0.002 - math.abs(ret0), 0.0)
+    float upTarget = math.max(ret0, 0.0)
+    qDataset := qDataset.pushRow(features, array.from(downTarget, neutralTarget, upTarget))
+
+if qDataset.ready(48)
+    if barstate.islastconfirmedhistory
+        nl.Batch train = qDataset.trainBatch(12)
+        qModel := qModel.trainOnBatch(train.inputTensor, train.targetTensor)
+        qLoss := qModel.trainStats.lastLoss
+
+    nl.Tensor liveState = nl.vector(array.from(ret3, atr3, ret2, atr2, ret1, atr1, ret0, atr0), "live_state")
+    nl.Tensor scaledState = qDataset.scaleInput(liveState)
+    nl.Tensor qValues = qModel.predict(scaledState)
+    qDown := qValues.get1d(0)
+    qNeutral := qValues.get1d(1)
+    qUp := qValues.get1d(2)
+
+plot(qDown, "Q down", color = color.red, linewidth = 2)
+plot(qNeutral, "Q neutral", color = color.gray)
+plot(qUp, "Q up", color = color.lime, linewidth = 2)
+plot(qLoss, "Training loss", color = color.orange)
+hline(0.0, "Zero", color = color.new(color.gray, 70))

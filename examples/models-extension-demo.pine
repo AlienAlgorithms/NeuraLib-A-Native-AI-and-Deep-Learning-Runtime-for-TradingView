@@ -1,0 +1,18 @@
+// NeuraLib Models Extension Demo
+// An example from the NeuraLib publication on TradingView.
+// (c) Alien_Algorithms. Licensed under CC BY-NC-SA 4.0, see LICENSE.
+//@version=6
+indicator("NeuraLib Models Extension Demo", overlay = false, calc_bars_count = 600)
+
+import Alien_Algorithms/NeuraLib/1 as nl
+import Alien_Algorithms/NeuraLib_Models/1 as models
+
+var nl.Sequential model = nl.sequential("advanced_demo")
+
+if barstate.isfirst
+    model := model
+      .input(array.from(8), "sequence")
+      .temporalConvStack(4, 2, 3, 2, 2, 1, nl.ActivationKind.relu, 0.0, "temporal")
+      .globalAvgPool1d(2, 3, "pool")
+      .duelingQHead(4, 2, nl.ActivationKind.relu, "q_head")
+      .build(nl.rng(7))
